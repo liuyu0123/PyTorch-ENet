@@ -4,14 +4,13 @@ import numpy as np
 from PIL import Image
 import torchvision.transforms as transforms
 from models.enet import ENet
-import matplotlib.pyplot as plt
 import argparse
 from tqdm import tqdm
 
 def get_args():
     parser = argparse.ArgumentParser(description='ENet Water Segmentation Prediction')
     parser.add_argument('--model-path', type=str, required=True, 
-                        help='Path to the trained model checkpoint (.pkl file)')
+                        help='Path to the trained model checkpoint (directory or .pkl file)')
     parser.add_argument('--input-dir', type=str, required=True,
                         help='Directory containing input images')
     parser.add_argument('--output-dir', type=str, default='./predictions',
@@ -23,19 +22,17 @@ def get_args():
     parser.add_argument('--width', type=int, default=480,
                         help='Input image width')
     parser.add_argument('--save-overlay', action='store_true',
-                        help='Save overlay visualization (image + mask)')
+                        help='Save overlay visualization (image + red mask)')
     parser.add_argument('--alpha', type=float, default=0.5,
                         help='Transparency for overlay (0-1)')
     return parser.parse_args()
 
 def load_model(model_path, device):
     """加载训练好的模型"""
-    # 创建模型 (2类: unlabeled, water)
     model = ENet(num_classes=2).to(device)
     
-    # 加载checkpoint（处理目录或文件路径）
+    # 处理目录路径
     if os.path.isdir(model_path):
-        # 如果是目录，找最新的 .pkl 文件
         pkl_files = [f for f in os.listdir(model_path) if f.endswith('.pkl')]
         if not pkl_files:
             raise FileNotFoundError(f"No .pkl files found in {model_path}")
@@ -48,79 +45,77 @@ def load_model(model_path, device):
     except TypeError:
         checkpoint = torch.load(model_path, map_location=device)
     
-    # 加载模型权重（从 state_dict 键中提取）
+    # 提取模型权重
     if 'state_dict' in checkpoint:
         model.load_state_dict(checkpoint['state_dict'])
-        print(f"Loaded model from epoch {checkpoint.get('epoch', 'unknown')}, mIoU: {checkpoint.get('miou', 'unknown'):.4f}")
+        print(f"Loaded model from epoch {checkpoint.get('epoch', 'unknown')}, mIoU: {checkpoint.get('miou', 0):.4f}")
     elif 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
-        print(f"Loaded model from epoch {checkpoint.get('epoch', 'unknown')}")
     else:
-        # 直接是模型权重
         model.load_state_dict(checkpoint)
-        print("Loaded model weights directly")
     
     model.eval()
     return model
 
 def predict_image(model, image_path, transform, device):
     """对单张图片进行预测"""
-    # 加载并预处理图片
     image = Image.open(image_path).convert('RGB')
     original_size = image.size  # (W, H)
     
-    # 应用变换
-    input_tensor = transform(image).unsqueeze(0).to(device)  # 添加batch维度
+    # 预处理
+    input_tensor = transform(image).unsqueeze(0).to(device)
     
     # 推理
     with torch.no_grad():
         output = model(input_tensor)
-        pred = torch.argmax(output, dim=1).squeeze(0)  # 获取预测类别 (H, W)
+        pred = torch.argmax(output, dim=1).squeeze(0)
     
-    # 转回PIL Image (mask)
+    # 转为 PIL，调整回原始尺寸
     pred_mask = pred.cpu().numpy().astype(np.uint8)
-    pred_mask_pil = Image.fromarray(pred_mask * 255)  # 0->0, 1->255 (白色水域)
-    
-    # 调整回原始尺寸
+    pred_mask_pil = Image.fromarray(pred_mask * 255)  # 0->0, 1->255
     pred_mask_pil = pred_mask_pil.resize(original_size, Image.NEAREST)
     
     return image, pred_mask_pil, pred_mask
 
 def create_overlay(image, mask, alpha=0.5):
-    """创建叠加可视化图"""
-    # 将mask转为红色半透明叠加层
+    """创建红色半透明叠加图"""
+    # 转为 numpy
+    img_array = np.array(image).astype(np.float32)
     mask_array = np.array(mask)
-    overlay = np.array(image).copy()
     
-    # 水域区域(白色)标记为红色
-    overlay[mask_array > 128] = [255, 0, 0]  # BGR红色
+    # 确保 mask 是 2D
+    if len(mask_array.shape) == 3:
+        mask_array = mask_array[:, :, 0]
     
-    # 混合
-    result = Image.blend(image, Image.fromarray(overlay), alpha)
-    return result
+    # 创建红色叠加层 (RGB: 255, 0, 0)
+    overlay = img_array.copy()
+    overlay[mask_array > 128] = [255, 0, 0]  # 红色标记水域区域
+    
+    # 混合: 原图 * (1-alpha) + 红色叠加层 * alpha
+    blended = img_array * (1 - alpha) + overlay * alpha
+    blended = np.clip(blended, 0, 255).astype(np.uint8)
+    
+    return Image.fromarray(blended)
 
 def main():
     args = get_args()
     
-    # 设置设备
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
     if args.save_overlay:
-        os.makedirs(os.path.join(args.output_dir, 'overlay'), exist_ok=True)
+        overlay_dir = os.path.join(args.output_dir, 'overlay')
+        os.makedirs(overlay_dir, exist_ok=True)
     
     # 加载模型
-    print(f"Loading model from: {args.model_path}")
     model = load_model(args.model_path, device)
     
-    # 图像预处理
+    # 图像预处理（与训练时一致）
     transform = transforms.Compose([
         transforms.Resize((args.height, args.width)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                           std=[0.229, 0.224, 0.225])  # ImageNet标准化
     ])
     
     # 获取所有图片
@@ -144,11 +139,11 @@ def main():
             
             base_name = os.path.splitext(img_name)[0]
             
-            # 保存mask (黑白图，白色=水域)
+            # 保存黑白 mask
             mask_path = os.path.join(args.output_dir, f"{base_name}_mask.png")
             pred_mask.save(mask_path)
             
-            # 保存叠加图
+            # 保存红色叠加图
             if args.save_overlay:
                 overlay = create_overlay(original_image, pred_mask, args.alpha)
                 overlay_path = os.path.join(args.output_dir, 'overlay', 
@@ -161,12 +156,13 @@ def main():
             
         except Exception as e:
             print(f"Error processing {img_name}: {e}")
-            continue
+            import traceback
+            traceback.print_exc()
     
-    print(f"\nDone! Results saved to: {args.output_dir}")
-    print(f"  - *_mask.png: Binary mask (white=water, black=background)")
+    print(f"\n✅ Done! Results saved to: {args.output_dir}")
+    print(f"   - *_mask.png: Binary mask (black=background, white=water)")
     if args.save_overlay:
-        print(f"  - overlay/*_overlay.png: Visualization with red overlay")
+        print(f"   - overlay/*_overlay.png: Original image with RED water overlay")
 
 if __name__ == '__main__':
     main()

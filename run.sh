@@ -40,3 +40,19 @@ python main_water.py -m test `
     --name enet_water `
     --dataset water `
     --dataset-dir ./data/WaterSegmentDataset
+
+
+#预测模型
+# 基本用法：只生成mask
+python predict.py `
+    --model-path ./save/enet_water/enet_water.pkl `
+    --input-dir ./data/WaterSegmentDataset/images `
+    --output-dir ./predictions
+
+# 带可视化叠加图（推荐，红色标记水域）
+python predict.py `
+    --model-path ./save/enet_water `
+    --input-dir ./data/img `
+    --output-dir ./data/predictions `
+    --save-overlay `
+    --alpha 0.5

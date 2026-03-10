@@ -61,9 +61,9 @@ def get_arguments():
     # Dataset
     parser.add_argument(
         "--dataset",
-        choices=['camvid', 'cityscapes'],
+        choices=['camvid', 'cityscapes', 'water'],
         default='camvid',
-        help="Dataset to use. Default: camvid")
+        help="Dataset to use. Default: camvid (camvid/cityscapes/water)")
     parser.add_argument(
         "--dataset-dir",
         type=str,
@@ -124,4 +124,8 @@ def get_arguments():
         default='save',
         help="The directory where models are saved. Default: save")
 
+    parser.add_argument('--val_split', type=float, default=0.2,
+                        help='验证集比例（默认0.2表示20%）')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='随机种子，保证划分结果可复现')
     return parser.parse_args()

@@ -40,68 +40,102 @@ def load_dataset(dataset):
         ext_transforms.PILToLongTensor()
     ])
 
-    # Get selected dataset
-    # Load the training set as tensors
-    train_set = dataset(
-        args.dataset_dir,
-        transform=image_transform,
-        label_transform=label_transform)
+    # ========== 修改部分：支持 water 数据集的自动划分 ==========
+    
+    if args.dataset.lower() == 'water':
+        # Water dataset：不使用 PILToLongTensor，在 Dataset 内部处理标签
+        label_transform_water = transforms.Compose([
+            transforms.Resize((args.height, args.width), Image.NEAREST),
+            # 注意：不要放 PILToLongTensor！
+        ])
+        
+        # 使用自定义 WaterDataset，自动划分训练/验证集
+        full_dataset = dataset(
+            args.dataset_dir,
+            transform=image_transform,
+            label_transform=label_transform_water  # 使用新的变换
+        )
+        
+        # 自动划分数据集
+        val_split = getattr(args, 'val_split', 0.2)
+        seed = getattr(args, 'seed', 42)
+        dataset_size = len(full_dataset)
+        val_size = int(val_split * dataset_size)
+        train_size = dataset_size - val_size
+        
+        print(f"Auto-splitting dataset: {train_size} train, {val_size} val")
+        
+        train_set, val_set = data.random_split(
+            full_dataset, 
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(seed)
+        )
+        
+        # 测试集暂时用验证集代替（或可以再划分）
+        test_set = val_set
+        
+    else:
+        # 原有的 CamVid/Cityscapes 逻辑
+        train_set = dataset(
+            args.dataset_dir,
+            transform=image_transform,
+            label_transform=label_transform)
+        val_set = dataset(
+            args.dataset_dir,
+            mode='val',
+            transform=image_transform,
+            label_transform=label_transform)
+        test_set = dataset(
+            args.dataset_dir,
+            mode='test',
+            transform=image_transform,
+            label_transform=label_transform)
+
+    # 创建 DataLoader
     train_loader = data.DataLoader(
         train_set,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.workers)
 
-    # Load the validation set as tensors
-    val_set = dataset(
-        args.dataset_dir,
-        mode='val',
-        transform=image_transform,
-        label_transform=label_transform)
     val_loader = data.DataLoader(
         val_set,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.workers)
 
-    # Load the test set as tensors
-    test_set = dataset(
-        args.dataset_dir,
-        mode='test',
-        transform=image_transform,
-        label_transform=label_transform)
     test_loader = data.DataLoader(
         test_set,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.workers)
 
-    # Get encoding between pixel valus in label images and RGB colors
-    class_encoding = train_set.color_encoding
+    # 获取类别编码
+    if args.dataset.lower() == 'water':
+        class_encoding = {'unlabeled': (0, 0, 0), 'water': (255, 255, 255)}
+    else:
+        class_encoding = train_set.color_encoding
+        if args.dataset.lower() == 'camvid':
+            del class_encoding['road_marking']
 
-    # Remove the road_marking class from the CamVid dataset as it's merged
-    # with the road class
-    if args.dataset.lower() == 'camvid':
-        del class_encoding['road_marking']
-
-    # Get number of classes to predict
     num_classes = len(class_encoding)
 
-    # Print information for debugging
+    # 打印调试信息
     print("Number of classes to predict:", num_classes)
     print("Train dataset size:", len(train_set))
     print("Validation dataset size:", len(val_set))
+    print("Test dataset size:", len(test_set))
 
-    # Get a batch of samples to display
+    # 显示样本批次
     if args.mode.lower() == 'test':
-        images, labels = iter(test_loader).next()
+        images, labels = next(iter(test_loader))
     else:
-        images, labels = iter(train_loader).next()
+        images, labels = next(iter(train_loader))
     print("Image size:", images.size())
     print("Label size:", labels.size())
     print("Class-color encoding:", class_encoding)
 
-    # Show a batch of samples and labels
+    # 显示批次图像
     if args.imshow_batch:
         print("Close the figure window to continue...")
         label_to_rgb = transforms.Compose([
@@ -111,10 +145,11 @@ def load_dataset(dataset):
         color_labels = utils.batch_transform(labels, label_to_rgb)
         utils.imshow_batch(images, color_labels)
 
-    # Get class weights from the selected weighing technique
+    # 计算类别权重
     print("\nWeighing technique:", args.weighing)
     print("Computing class weights...")
     print("(this can take a while depending on the dataset size)")
+    
     class_weights = 0
     if args.weighing.lower() == 'enet':
         class_weights = enet_weighing(train_loader, num_classes)
@@ -125,15 +160,13 @@ def load_dataset(dataset):
 
     if class_weights is not None:
         class_weights = torch.from_numpy(class_weights).float().to(device)
-        # Set the weight of the unlabeled class to 0
         if args.ignore_unlabeled:
             ignore_index = list(class_encoding).index('unlabeled')
             class_weights[ignore_index] = 0
 
     print("Class weights:", class_weights)
 
-    return (train_loader, val_loader,
-            test_loader), class_weights, class_encoding
+    return (train_loader, val_loader, test_loader), class_weights, class_encoding
 
 
 def train(train_loader, val_loader, class_weights, class_encoding):
@@ -290,10 +323,10 @@ if __name__ == '__main__':
         from data import CamVid as dataset
     elif args.dataset.lower() == 'cityscapes':
         from data import Cityscapes as dataset
+    elif args.dataset.lower() == 'water':
+        from data.water_dataset import WaterDataset as dataset
     else:
-        # Should never happen...but just in case it does
-        raise RuntimeError("\"{0}\" is not a supported dataset.".format(
-            args.dataset))
+        raise RuntimeError("\"{0}\" is not a supported dataset.".format(args.dataset))
 
     loaders, w_class, class_encoding = load_dataset(dataset)
     train_loader, val_loader, test_loader = loaders

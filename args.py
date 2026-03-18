@@ -70,6 +70,43 @@ def get_arguments():
         default="data/CamVid",
         help="Path to the root directory of the selected dataset. "
         "Default: data/CamVid")
+    
+    # ========== 新增：手动指定训练集路径 ==========
+    parser.add_argument(
+        "--images",
+        type=str,
+        default=None,
+        help="Path to training images directory (manual mode for water dataset)")
+    parser.add_argument(
+        "--masks",
+        type=str,
+        default=None,
+        help="Path to training masks/labels directory (manual mode for water dataset)")
+    
+    # ========== 新增：手动指定验证集路径 ==========
+    parser.add_argument(
+        "--val-images",
+        type=str,
+        default=None,
+        help="Path to validation images directory (manual mode)")
+    parser.add_argument(
+        "--val-masks",
+        type=str,
+        default=None,
+        help="Path to validation masks directory (manual mode)")
+    
+    # ========== 新增：可选的测试集路径 ==========
+    parser.add_argument(
+        "--test-images",
+        type=str,
+        default=None,
+        help="Path to test images directory (optional, manual mode)")
+    parser.add_argument(
+        "--test-masks",
+        type=str,
+        default=None,
+        help="Path to test masks directory (optional, manual mode)")
+
     parser.add_argument(
         "--height",
         type=int,
@@ -124,8 +161,16 @@ def get_arguments():
         default='save',
         help="The directory where models are saved. Default: save")
 
-    parser.add_argument('--val_split', type=float, default=0.2,
-                        help='验证集比例（默认0.2表示20%）')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='随机种子，保证划分结果可复现')
+    # Auto-split settings (仅自动模式使用)
+    parser.add_argument(
+        '--val_split', 
+        type=float, 
+        default=0.2,
+        help='验证集比例（默认0.2表示20%）')
+    parser.add_argument(
+        '--seed', 
+        type=int, 
+        default=42,
+        help='随机种子，保证划分结果可复现')
+    
     return parser.parse_args()

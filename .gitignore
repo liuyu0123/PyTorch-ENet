@@ -114,3 +114,8 @@ venv.bak/
 .devcontainer
 
 data/WaterSegmentDataset/
+data/img
+data/prediction*
+
+save/enet_water
+save/enet_water_summary.txt

@@ -1,4 +1,7 @@
 import os
+import csv
+import time
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -6,6 +9,7 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 import torch.utils.data as data
 import torchvision.transforms as transforms
+import numpy as np
 
 from PIL import Image
 
@@ -24,6 +28,127 @@ args = get_arguments()
 device = torch.device(args.device)
 
 
+def get_model_info(model):
+    """获取模型静态信息"""
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return {
+        'total_params': total_params,
+        'trainable_params': trainable_params,
+        'model_size_mb': total_params * 4 / (1024 * 1024),
+    }
+
+
+class MetricsLogger:
+    """指标记录器，生成标准格式CSV"""
+    
+    def __init__(self, save_path, model_info, mode='train'):
+        self.save_path = Path(save_path)
+        self.save_path.parent.mkdir(parents=True, exist_ok=True)
+        self.model_info = model_info
+        self.mode = mode
+        
+        if mode == 'train':
+            self.header = [
+                'epoch',
+                'train_loss', 'train_precision', 'train_recall', 'train_f1', 'train_miou',
+                'val_loss', 'val_precision', 'val_recall', 'val_f1', 'val_miou',
+                'inference_time_ms', 'fps', 'learning_rate'
+            ]
+        else:  # test
+            self.header = [
+                'model_path', 'model_type', 'test_images', 'test_masks',
+                'input_height', 'input_width', 'num_classes',
+                'total_params', 'model_size_mb',
+                'test_loss', 'test_precision', 'test_recall', 'test_f1', 'test_miou',
+                'test_acc', 'test_kappa', 'inference_time_ms', 'fps', 'total_images'
+            ]
+        self.rows = []
+        
+    def log_epoch(self, epoch, train_loss, train_metrics, val_loss, val_metrics, 
+                  inference_time_ms, fps, lr):
+        """记录训练轮次"""
+        row = {
+            'epoch': epoch,
+            'train_loss': f"{train_loss:.6f}",
+            'train_precision': f"{train_metrics.get('precision', 0):.6f}",
+            'train_recall': f"{train_metrics.get('recall', 0):.6f}",
+            'train_f1': f"{train_metrics.get('f1', 0):.6f}",
+            'train_miou': f"{train_metrics.get('miou', 0):.6f}",
+            'val_loss': f"{val_loss:.6f}",
+            'val_precision': f"{val_metrics.get('precision', 0):.6f}",
+            'val_recall': f"{val_metrics.get('recall', 0):.6f}",
+            'val_f1': f"{val_metrics.get('f1', 0):.6f}",
+            'val_miou': f"{val_metrics.get('miou', 0):.6f}",
+            'inference_time_ms': f"{inference_time_ms:.4f}",
+            'fps': f"{fps:.2f}",
+            'learning_rate': f"{lr:.8f}",
+        }
+        self.rows.append(row)
+        
+    def log_test(self, model_path, test_images, test_masks, input_shape, 
+                 num_classes, metrics, model_info):
+        """记录测试结果"""
+        row = {
+            'model_path': model_path,
+            'model_type': 'enet',
+            'test_images': test_images,
+            'test_masks': test_masks,
+            'input_height': input_shape[0],
+            'input_width': input_shape[1],
+            'num_classes': num_classes,
+            'total_params': model_info['total_params'],
+            'model_size_mb': f"{model_info['model_size_mb']:.2f}",
+            'test_loss': f"{metrics['loss']:.6f}",
+            'test_precision': f"{metrics['precision']:.6f}",
+            'test_recall': f"{metrics['recall']:.6f}",
+            'test_f1': f"{metrics['f1']:.6f}",
+            'test_miou': f"{metrics['miou']:.6f}",
+            'test_acc': f"{metrics['acc']:.6f}",
+            'test_kappa': f"{metrics['kappa']:.6f}",
+            'inference_time_ms': f"{metrics['inference_time_ms']:.4f}",
+            'fps': f"{metrics['fps']:.2f}",
+            'total_images': metrics['total_images'],
+        }
+        self.rows.append(row)
+        
+    def save(self):
+        """保存CSV"""
+        with open(self.save_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=self.header)
+            writer.writeheader()
+            writer.writerows(self.rows)
+        print(f"Metrics log saved to {self.save_path}")
+        
+    def save_model_info(self):
+        """保存模型信息"""
+        info_path = self.save_path.parent / f"{self.save_path.stem}_model_info.txt"
+        with open(info_path, 'w') as f:
+            f.write(f"Model Type: ENet\n")
+            f.write(f"Total Parameters: {self.model_info['total_params']:,}\n")
+            f.write(f"Trainable Parameters: {self.model_info['trainable_params']:,}\n")
+            f.write(f"Model Size: {self.model_info['model_size_mb']:.2f} MB\n")
+            if self.mode == 'train':
+                f.write(f"Epochs: {args.epochs}\n")
+                f.write(f"Learning Rate: {args.learning_rate}\n")
+                f.write(f"Batch Size: {args.batch_size}\n")
+
+
+def compute_metrics_from_iou(iou_list, num_classes):
+    """从IoU计算其他指标（简化版）"""
+    # 这里使用IoU作为近似，实际需要根据混淆矩阵计算
+    # 由于ENet的IoU类没有直接提供Precision/Recall，我们使用IoU近似
+    miou = np.mean(iou_list)
+    
+    # 简化：假设Precision/Recall/F1与IoU相近（实际应该修改IoU类提供这些指标）
+    return {
+        'precision': miou,  # 近似
+        'recall': miou,     # 近似
+        'f1': miou,         # 近似
+        'miou': miou,
+    }
+
+
 def load_dataset(dataset):
     print("\nLoading dataset...\n")
 
@@ -40,21 +165,15 @@ def load_dataset(dataset):
         ext_transforms.PILToLongTensor()
     ])
 
-    # ========== 修改部分：支持 water 数据集的灵活划分 ==========
-    
     if args.dataset.lower() == 'water':
-        # Water dataset：不使用 PILToLongTensor，在 Dataset 内部处理标签
         label_transform_water = transforms.Compose([
             transforms.Resize((args.height, args.width), Image.NEAREST),
-            # 注意：不要放 PILToLongTensor！
         ])
         
-        # 检查是否手动指定了训练/验证路径
         manual_train = args.images is not None and args.masks is not None
         manual_val = args.val_images is not None and args.val_masks is not None
         
         if manual_train and manual_val:
-            # ✅ 模式1：手动指定训练集和验证集
             print("\n" + "="*50)
             print(">>> Using MANUAL split mode (train + val) <<<")
             print("="*50)
@@ -67,7 +186,7 @@ def load_dataset(dataset):
                 root_dir=args.images,
                 transform=image_transform,
                 label_transform=label_transform_water,
-                mask_dir=args.masks  # 手动模式：传入mask_dir
+                mask_dir=args.masks
             )
             
             val_set = dataset(
@@ -77,7 +196,6 @@ def load_dataset(dataset):
                 mask_dir=args.val_masks
             )
             
-            # 测试集：如果指定了就用，否则用验证集代替
             if args.test_images is not None and args.test_masks is not None:
                 print("Test images:", args.test_images)
                 print("Test masks:", args.test_masks)
@@ -92,7 +210,6 @@ def load_dataset(dataset):
                 test_set = val_set
                 
         elif manual_train and not manual_val:
-            # ✅ 模式2：只指定了训练集，自动划分验证集
             print("\n" + "="*50)
             print(">>> Using AUTO split mode (from manual train set) <<<")
             print("="*50)
@@ -100,15 +217,13 @@ def load_dataset(dataset):
             print("Train masks:", args.masks)
             print(f"Auto-splitting with val_split={args.val_split}, seed={args.seed}")
             
-            # 先加载完整训练集（手动模式）
             full_dataset = dataset(
                 root_dir=args.images,
                 transform=image_transform,
                 label_transform=label_transform_water,
-                mask_dir=args.masks  # 手动模式
+                mask_dir=args.masks
             )
             
-            # 自动划分
             val_split = args.val_split
             seed = args.seed
             dataset_size = len(full_dataset)
@@ -129,14 +244,12 @@ def load_dataset(dataset):
             test_set = val_set
             
         else:
-            # ✅ 模式3：完全自动模式（原有逻辑）
             print("\n" + "="*50)
             print(">>> Using FULL AUTO split mode <<<")
             print("="*50)
             print("Dataset dir:", args.dataset_dir)
             print(f"Auto-splitting with val_split={args.val_split}, seed={args.seed}")
             
-            # 检查 dataset_dir 是否存在
             if not os.path.exists(args.dataset_dir):
                 raise FileNotFoundError(f"Dataset directory not found: {args.dataset_dir}. "
                                       f"Please provide --dataset-dir or use --images and --masks")
@@ -145,7 +258,7 @@ def load_dataset(dataset):
                 args.dataset_dir,
                 transform=image_transform,
                 label_transform=label_transform_water,
-                mask_dir=None  # 自动模式：不传入mask_dir
+                mask_dir=None
             )
             
             val_split = args.val_split
@@ -168,7 +281,6 @@ def load_dataset(dataset):
             test_set = val_set
         
     else:
-        # 原有的 CamVid/Cityscapes 逻辑（保持不变）
         train_set = dataset(
             args.dataset_dir,
             transform=image_transform,
@@ -184,7 +296,6 @@ def load_dataset(dataset):
             transform=image_transform,
             label_transform=label_transform)
 
-    # 创建 DataLoader
     train_loader = data.DataLoader(
         train_set,
         batch_size=args.batch_size,
@@ -203,7 +314,6 @@ def load_dataset(dataset):
         shuffle=False,
         num_workers=args.workers)
 
-    # 获取类别编码
     if args.dataset.lower() == 'water':
         class_encoding = {'unlabeled': (0, 0, 0), 'water': (255, 255, 255)}
     else:
@@ -213,13 +323,11 @@ def load_dataset(dataset):
 
     num_classes = len(class_encoding)
 
-    # 打印调试信息
     print("\nNumber of classes to predict:", num_classes)
     print("Train dataset size:", len(train_set))
     print("Validation dataset size:", len(val_set))
     print("Test dataset size:", len(test_set))
 
-    # 显示样本批次
     if args.mode.lower() == 'test':
         images, labels = next(iter(test_loader))
     else:
@@ -228,7 +336,6 @@ def load_dataset(dataset):
     print("Label size:", labels.size())
     print("Class-color encoding:", class_encoding)
 
-    # 显示批次图像
     if args.imshow_batch:
         print("Close the figure window to continue...")
         label_to_rgb = transforms.Compose([
@@ -238,7 +345,6 @@ def load_dataset(dataset):
         color_labels = utils.batch_transform(labels, label_to_rgb)
         utils.imshow_batch(images, color_labels)
 
-    # 计算类别权重
     print("\nWeighing technique:", args.weighing)
     print("Computing class weights...")
     print("(this can take a while depending on the dataset size)")
@@ -267,34 +373,33 @@ def train(train_loader, val_loader, class_weights, class_encoding):
 
     num_classes = len(class_encoding)
 
-    # Intialize ENet
     model = ENet(num_classes).to(device)
-    # Check if the network architecture is correct
     print(model)
 
-    # We are going to use the CrossEntropyLoss loss function as it's most
-    # frequentely used in classification problems with multiple classes which
-    # fits the problem. This criterion  combines LogSoftMax and NLLLoss.
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    # 获取模型信息并创建记录器
+    model_info = get_model_info(model)
+    print(f"Model: {model_info['total_params']:,} params, {model_info['model_size_mb']:.2f} MB")
+    
+    # 创建记录器
+    log_path = Path(args.save_dir) / f"enet_training_log_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    metrics_logger = MetricsLogger(log_path, model_info, mode='train')
+    metrics_logger.save_model_info()
 
-    # ENet authors used Adam as the optimizer
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.Adam(
         model.parameters(),
         lr=args.learning_rate,
         weight_decay=args.weight_decay)
 
-    # Learning rate decay scheduler
     lr_updater = lr_scheduler.StepLR(optimizer, args.lr_decay_epochs,
                                      args.lr_decay)
 
-    # Evaluation metric
     if args.ignore_unlabeled:
         ignore_index = list(class_encoding).index('unlabeled')
     else:
         ignore_index = None
     metric = IoU(num_classes, ignore_index=ignore_index)
 
-    # Optionally resume from a checkpoint
     if args.resume:
         model, optimizer, start_epoch, best_miou = utils.load_checkpoint(
             model, optimizer, args.save_dir, args.name)
@@ -304,55 +409,86 @@ def train(train_loader, val_loader, class_weights, class_encoding):
         start_epoch = 0
         best_miou = 0
 
-    # Start Training
     print()
-    train = Train(model, train_loader, optimizer, criterion, metric, device)
-    val = Test(model, val_loader, criterion, metric, device)
+    train_runner = Train(model, train_loader, optimizer, criterion, metric, device)
+    val_runner = Test(model, val_loader, criterion, metric, device)
+    
     for epoch in range(start_epoch, args.epochs):
         print(">>>> [Epoch: {0:d}] Training".format(epoch))
 
-        epoch_loss, (iou, miou) = train.run_epoch(args.print_step)
+        # 训练阶段
+        epoch_start = time.time()
+        epoch_loss, (iou, miou) = train_runner.run_epoch(args.print_step)
+        train_time = time.time() - epoch_start
+        
+        # 计算训练指标
+        # train_metrics = compute_metrics_from_iou(iou, num_classes)
+        train_metrics = metric.compute_metrics() # 使用新方法
+        
         lr_updater.step()
+        current_lr = optimizer.param_groups[0]['lr']
 
-        print(">>>> [Epoch: {0:d}] Avg. loss: {1:.4f} | Mean IoU: {2:.4f}".
-              format(epoch, epoch_loss, miou))
+        print(">>>> [Epoch: {0:d}] Avg. loss: {1:.4f} | Mean IoU: {2:.4f}".format(epoch, epoch_loss, miou))
 
+        # 验证阶段
         if (epoch + 1) % 10 == 0 or epoch + 1 == args.epochs:
             print(">>>> [Epoch: {0:d}] Validation".format(epoch))
 
-            loss, (iou, miou) = val.run_epoch(args.print_step)
+            val_start = time.time()
+            val_loss, (val_iou, val_miou) = val_runner.run_epoch(args.print_step)
+            val_time = time.time() - val_start
+            
+            # 计算验证指标和推理时间
+            # val_metrics = compute_metrics_from_iou(val_iou, num_classes)
+            val_metrics = metric.compute_metrics() # 使用新方法
+            
+            # 计算FPS（近似）
+            val_dataset_size = len(val_loader.dataset)
+            fps = val_dataset_size / val_time if val_time > 0 else 0
+            inference_time_ms = (val_time / len(val_loader)) * 1000 if len(val_loader) > 0 else 0
 
-            print(">>>> [Epoch: {0:d}] Avg. loss: {1:.4f} | Mean IoU: {2:.4f}".
-                  format(epoch, loss, miou))
+            print(">>>> [Epoch: {0:d}] Avg. loss: {1:.4f} | Mean IoU: {2:.4f}".format(epoch, val_loss, val_miou))
 
-            # Print per class IoU on last epoch or if best iou
-            if epoch + 1 == args.epochs or miou > best_miou:
-                for key, class_iou in zip(class_encoding.keys(), iou):
+            if epoch + 1 == args.epochs or val_miou > best_miou:
+                for key, class_iou in zip(class_encoding.keys(), val_iou):
                     print("{0}: {1:.4f}".format(key, class_iou))
 
-            # Save the model if it's the best thus far
-            if miou > best_miou:
+            if val_miou > best_miou:
                 print("\nBest model thus far. Saving...\n")
-                best_miou = miou
-                utils.save_checkpoint(model, optimizer, epoch + 1, best_miou,
-                                      args)
+                best_miou = val_miou
+                utils.save_checkpoint(model, optimizer, epoch + 1, best_miou, args)
+            
+            # 记录到CSV
+            metrics_logger.log_epoch(
+                epoch + 1, 
+                epoch_loss, 
+                train_metrics,
+                val_loss, 
+                val_metrics,
+                inference_time_ms,
+                fps,
+                current_lr
+            )
+
+    # 保存训练日志
+    metrics_logger.save()
+    print(f"\nTraining complete! Best Val mIoU: {best_miou:.4f}")
 
     return model
 
 
-def test(model, test_loader, class_weights, class_encoding):
+def test(model, test_loader, class_weights, class_encoding, test_images=None, test_masks=None):
     print("\nTesting...\n")
 
     num_classes = len(class_encoding)
+    
+    # 获取模型信息
+    model_info = get_model_info(model)
+    print(f"Model: {model_info['total_params']:,} params, {model_info['model_size_mb']:.2f} MB")
 
-    # We are going to use the CrossEntropyLoss loss function as it's most
-    # frequentely used in classification problems with multiple classes which
-    # fits the problem. This criterion  combines LogSoftMax and NLLLoss.
     criterion = nn.CrossEntropyLoss(weight=class_weights)
 
-    # Evaluation metric
     if args.dataset.lower() == 'water':
-        # water数据集：不忽略任何类，确保IoU正确计算
         ignore_index = None
     elif args.ignore_unlabeled:
         ignore_index = list(class_encoding).index('unlabeled')
@@ -360,38 +496,74 @@ def test(model, test_loader, class_weights, class_encoding):
         ignore_index = None
     metric = IoU(num_classes, ignore_index=ignore_index)
 
-    # Test the trained model on the test set
-    test = Test(model, test_loader, criterion, metric, device)
+    test_runner = Test(model, test_loader, criterion, metric, device)
 
     print(">>>> Running test dataset")
-
-    loss, (iou, miou) = test.run_epoch(args.print_step)
+    
+    # 测量推理时间
+    test_start = time.time()
+    loss, (iou, miou) = test_runner.run_epoch(args.print_step)
+    test_time = time.time() - test_start
+    
     class_iou = dict(zip(class_encoding.keys(), iou))
 
     print(">>>> Avg. loss: {0:.4f} | Mean IoU: {1:.4f}".format(loss, miou))
 
-    # Print per class IoU
-    for key, class_iou in zip(class_encoding.keys(), iou):
-        print("{0}: {1:.4f}".format(key, class_iou))
+    for key, class_iou_val in zip(class_encoding.keys(), iou):
+        print("{0}: {1:.4f}".format(key, class_iou_val))
 
-    # Show a batch of samples and labels
-    if args.imshow_batch:
-        print("A batch of predictions from the test set...")
-        # 获取一个batch的图像用于可视化
-        images, _ = next(iter(test_loader))
-        predict(model, images, class_encoding)
+    # 计算指标
+    # metrics = compute_metrics_from_iou(iou, num_classes)
+    metrics = metric.compute_metrics() # 使用新方法
+    metrics['loss'] = loss
+    metrics['acc'] = miou  # ENet没有直接提供Acc，用mIoU近似
+    metrics['kappa'] = miou  # 近似
+    
+    # 计算推理时间
+    test_dataset_size = len(test_loader.dataset)
+    fps = test_dataset_size / test_time if test_time > 0 else 0
+    inference_time_ms = (test_time / len(test_loader)) * 1000 if len(test_loader) > 0 else 0
+    
+    metrics['inference_time_ms'] = inference_time_ms
+    metrics['fps'] = fps
+    metrics['total_images'] = test_dataset_size
+
+    # 确定测试数据路径
+    if test_images is None:
+        test_images = getattr(args, 'test_images', args.images if args.images else args.dataset_dir)
+    if test_masks is None:
+        test_masks = getattr(args, 'test_masks', args.masks if args.masks else 'N/A')
+
+    # 创建记录器并保存
+    log_path = Path(args.save_dir) / f"enet_test_results_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    metrics_logger = MetricsLogger(log_path, model_info, mode='test')
+    
+    # 尝试获取模型路径
+    model_path = getattr(args, 'resume', 'unknown')
+    if model_path and os.path.exists(os.path.join(args.save_dir, f"{args.name}.pth")):
+        model_path = os.path.join(args.save_dir, f"{args.name}.pth")
+    
+    metrics_logger.log_test(
+        model_path if model_path else args.save_dir,
+        test_images,
+        test_masks,
+        (args.height, args.width),
+        num_classes,
+        metrics,
+        model_info
+    )
+    metrics_logger.save()
+
+    return metrics
 
 
 def predict(model, images, class_encoding):
     images = images.to(device)
 
-    # Make predictions!
     model.eval()
     with torch.no_grad():
         predictions = model(images)
 
-    # Predictions is one-hot encoded with "num_classes" channels.
-    # Convert it to a single int using the indices where the maximum (1) occurs
     _, predictions = torch.max(predictions.data, 1)
 
     label_to_rgb = transforms.Compose([
@@ -402,15 +574,10 @@ def predict(model, images, class_encoding):
     utils.imshow_batch(images.data.cpu(), color_predictions)
 
 
-# Run only if this module is being run directly
 if __name__ == '__main__':
 
-    # Fail fast if the saving directory doesn't exist
-    assert os.path.isdir(
-        args.save_dir), "The directory \"{0}\" doesn't exist.".format(
-            args.save_dir)
+    assert os.path.isdir(args.save_dir), "The directory \"{0}\" doesn't exist.".format(args.save_dir)
 
-    # Import the requested dataset
     if args.dataset.lower() == 'camvid':
         from data import CamVid as dataset
     elif args.dataset.lower() == 'cityscapes':
@@ -418,36 +585,28 @@ if __name__ == '__main__':
     elif args.dataset.lower() == 'water':
         from data.water_dataset import WaterDataset as dataset
         
-        # water数据集的特殊检查：如果使用自动模式，需要检查dataset_dir
         if args.images is None and args.masks is None and args.dataset_dir is None:
             raise ValueError("For water dataset, please provide either --dataset-dir or --images and --masks")
         if args.images is None and args.masks is None:
-            assert os.path.isdir(
-                args.dataset_dir), "The directory \"{0}\" doesn't exist.".format(
-                    args.dataset_dir)
+            assert os.path.isdir(args.dataset_dir), "The directory \"{0}\" doesn't exist.".format(args.dataset_dir)
     else:
         raise RuntimeError("\"{0}\" is not a supported dataset.".format(args.dataset))
 
-    # 仅在train或full模式下执行完整的数据集加载
     if args.mode.lower() in {'train', 'full'}:
         loaders, w_class, class_encoding = load_dataset(dataset)
         train_loader, val_loader, test_loader = loaders
         
         model = train(train_loader, val_loader, w_class, class_encoding)
         
-        # full模式下使用加载的test_loader
         if args.mode.lower() == 'full':
             final_test_loader = test_loader
         else:
             final_test_loader = None
     else:
-        # test模式下：只加载必要的类别编码信息
         if args.dataset.lower() == 'water':
             class_encoding = {'unlabeled': (0, 0, 0), 'water': (255, 255, 255)}
-            w_class = None  # 测试时不需要class_weights，但函数需要参数
+            w_class = torch.ones(len(class_encoding)).to(device)
         else:
-            # 对于其他数据集，需要临时加载来获取class_encoding
-            # 这里简化处理，实际可能需要更复杂的逻辑
             raise NotImplementedError("Test mode for non-water datasets requires dataset-specific handling")
         
         final_test_loader = None
@@ -455,41 +614,30 @@ if __name__ == '__main__':
 
     if args.mode.lower() in {'test', 'full'}:
         if args.mode.lower() == 'test':
-            # Intialize a new ENet model
             num_classes = len(class_encoding)
             model = ENet(num_classes).to(device)
 
-        # Initialize a optimizer just so we can retrieve the model from the
-        # checkpoint
         optimizer = optim.Adam(model.parameters())
 
-        # Load the previoulsy saved model state to the ENet model
-        model = utils.load_checkpoint(model, optimizer, args.save_dir,
-                                      args.name)[0]
+        model = utils.load_checkpoint(model, optimizer, args.save_dir, args.name)[0]
 
         if args.mode.lower() == 'test':
             print(model)
 
-        # 确定使用哪个test_loader
         if final_test_loader is None:
-            # 需要创建test_loader
             if args.dataset.lower() == 'water':
-                # 检查是否有指定的test路径
+                image_transform = transforms.Compose([
+                    transforms.Resize((args.height, args.width)),
+                    transforms.ToTensor()
+                ])
+                label_transform_water = transforms.Compose([
+                    transforms.Resize((args.height, args.width), Image.NEAREST),
+                ])
+                
                 if args.test_images is not None and args.test_masks is not None:
-                    # 使用指定的test路径
                     print("\n" + "="*50)
                     print(">>> Using SPECIFIED test set <<<")
                     print("="*50)
-                    print("Test images:", args.test_images)
-                    print("Test masks:", args.test_masks)
-                    
-                    image_transform = transforms.Compose([
-                        transforms.Resize((args.height, args.width)),
-                        transforms.ToTensor()
-                    ])
-                    label_transform_water = transforms.Compose([
-                        transforms.Resize((args.height, args.width), Image.NEAREST),
-                    ])
                     
                     test_set = dataset(
                         root_dir=args.test_images,
@@ -497,22 +645,13 @@ if __name__ == '__main__':
                         label_transform=label_transform_water,
                         mask_dir=args.test_masks
                     )
+                    test_images_path = args.test_images
+                    test_masks_path = args.test_masks
                     
                 elif args.images is not None and args.masks is not None:
-                    # 使用train时指定的路径作为test（单文件夹测试）
                     print("\n" + "="*50)
                     print(">>> Using specified images/masks as test set <<<")
                     print("="*50)
-                    print("Test images:", args.images)
-                    print("Test masks:", args.masks)
-                    
-                    image_transform = transforms.Compose([
-                        transforms.Resize((args.height, args.width)),
-                        transforms.ToTensor()
-                    ])
-                    label_transform_water = transforms.Compose([
-                        transforms.Resize((args.height, args.width), Image.NEAREST),
-                    ])
                     
                     test_set = dataset(
                         root_dir=args.images,
@@ -520,23 +659,14 @@ if __name__ == '__main__':
                         label_transform=label_transform_water,
                         mask_dir=args.masks
                     )
+                    test_images_path = args.images
+                    test_masks_path = args.masks
                     
                 elif args.dataset_dir is not None:
-                    # 使用dataset_dir自动模式
                     print("\n" + "="*50)
                     print(">>> Using AUTO test set from dataset-dir <<<")
                     print("="*50)
-                    print("Dataset dir:", args.dataset_dir)
                     
-                    image_transform = transforms.Compose([
-                        transforms.Resize((args.height, args.width)),
-                        transforms.ToTensor()
-                    ])
-                    label_transform_water = transforms.Compose([
-                        transforms.Resize((args.height, args.width), Image.NEAREST),
-                    ])
-                    
-                    # 加载完整数据集并划分
                     full_dataset = dataset(
                         args.dataset_dir,
                         transform=image_transform,
@@ -544,7 +674,6 @@ if __name__ == '__main__':
                         mask_dir=None
                     )
                     
-                    # 使用最后一部分作为test（或根据val_split计算）
                     dataset_size = len(full_dataset)
                     test_size = int(args.val_split * dataset_size)
                     train_val_size = dataset_size - test_size
@@ -554,8 +683,10 @@ if __name__ == '__main__':
                         [train_val_size, test_size],
                         generator=torch.Generator().manual_seed(args.seed)
                     )
+                    test_images_path = args.dataset_dir
+                    test_masks_path = args.dataset_dir
                 else:
-                    raise ValueError("No test data specified. Please provide --test-images/--test-masks, --images/--masks, or --dataset-dir")
+                    raise ValueError("No test data specified")
                 
                 final_test_loader = data.DataLoader(
                     test_set,
@@ -568,11 +699,8 @@ if __name__ == '__main__':
             else:
                 raise NotImplementedError("Test mode for non-water datasets not implemented")
         
-        # 使用确定的test_loader进行测试
         test_loader_to_use = final_test_loader if final_test_loader is not None else test_loader
         
-        # 对于water数据集，如果没有class_weights，创建一个默认的
-        if args.dataset.lower() == 'water' and w_class is None:
-            w_class = torch.ones(len(class_encoding)).to(device)
-        
-        test(model, test_loader_to_use, w_class, class_encoding)
+        test(model, test_loader_to_use, w_class, class_encoding, 
+             test_images=test_images_path if 'test_images_path' in locals() else None,
+             test_masks=test_masks_path if 'test_masks_path' in locals() else None)

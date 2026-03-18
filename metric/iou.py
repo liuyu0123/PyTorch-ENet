@@ -90,3 +90,39 @@ class IoU(metric.Metric):
             iou = true_positive / (true_positive + false_positive + false_negative)
 
         return iou, np.nanmean(iou)
+
+    def compute_metrics(self):
+        """根据混淆矩阵精确计算 Precision, Recall, F1 和 mIoU"""
+        conf_matrix = self.conf_metric.value()
+        
+        # 处理忽略的类别
+        if self.ignore_index is not None:
+            conf_matrix_copy = conf_matrix.copy()
+            conf_matrix_copy[:, self.ignore_index] = 0
+            conf_matrix_copy[self.ignore_index, :] = 0
+        else:
+            conf_matrix_copy = conf_matrix
+
+        true_positive = np.diag(conf_matrix_copy)
+        false_positive = np.sum(conf_matrix_copy, 0) - true_positive
+        false_negative = np.sum(conf_matrix_copy, 1) - true_positive
+
+        # 计算各项指标
+        with np.errstate(divide='ignore', invalid='ignore'):
+            # Precision = TP / (TP + FP)
+            precision_per_class = true_positive / (true_positive + false_positive)
+            # Recall = TP / (TP + FN)
+            recall_per_class = true_positive / (true_positive + false_negative)
+            # F1 = 2 * (Precision * Recall) / (Precision + Recall)
+            f1_per_class = 2 * (precision_per_class * recall_per_class) / (precision_per_class + recall_per_class)
+            # IoU
+            iou_per_class = true_positive / (true_positive + false_positive + false_negative)
+
+        # 计算均值
+        metrics = {
+            'precision': np.nanmean(precision_per_class),
+            'recall': np.nanmean(recall_per_class),
+            'f1': np.nanmean(f1_per_class),
+            'miou': np.nanmean(iou_per_class),
+        }
+        return metrics

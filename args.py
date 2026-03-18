@@ -67,9 +67,9 @@ def get_arguments():
     parser.add_argument(
         "--dataset-dir",
         type=str,
-        default="data/CamVid",
+        default="data/WaterSegmentDataset",
         help="Path to the root directory of the selected dataset. "
-        "Default: data/CamVid")
+        "Default: data/WaterSegmentDataset")
     
     # ========== 新增：手动指定训练集路径 ==========
     parser.add_argument(

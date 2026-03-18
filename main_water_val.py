@@ -351,7 +351,10 @@ def test(model, test_loader, class_weights, class_encoding):
     criterion = nn.CrossEntropyLoss(weight=class_weights)
 
     # Evaluation metric
-    if args.ignore_unlabeled:
+    if args.dataset.lower() == 'water':
+        # water数据集：不忽略任何类，确保IoU正确计算
+        ignore_index = None
+    elif args.ignore_unlabeled:
         ignore_index = list(class_encoding).index('unlabeled')
     else:
         ignore_index = None
@@ -374,7 +377,8 @@ def test(model, test_loader, class_weights, class_encoding):
     # Show a batch of samples and labels
     if args.imshow_batch:
         print("A batch of predictions from the test set...")
-        images, _ = iter(test_loader).next()
+        # 获取一个batch的图像用于可视化
+        images, _ = next(iter(test_loader))
         predict(model, images, class_encoding)
 
 
@@ -415,6 +419,8 @@ if __name__ == '__main__':
         from data.water_dataset import WaterDataset as dataset
         
         # water数据集的特殊检查：如果使用自动模式，需要检查dataset_dir
+        if args.images is None and args.masks is None and args.dataset_dir is None:
+            raise ValueError("For water dataset, please provide either --dataset-dir or --images and --masks")
         if args.images is None and args.masks is None:
             assert os.path.isdir(
                 args.dataset_dir), "The directory \"{0}\" doesn't exist.".format(
@@ -422,11 +428,30 @@ if __name__ == '__main__':
     else:
         raise RuntimeError("\"{0}\" is not a supported dataset.".format(args.dataset))
 
-    loaders, w_class, class_encoding = load_dataset(dataset)
-    train_loader, val_loader, test_loader = loaders
-
+    # 仅在train或full模式下执行完整的数据集加载
     if args.mode.lower() in {'train', 'full'}:
+        loaders, w_class, class_encoding = load_dataset(dataset)
+        train_loader, val_loader, test_loader = loaders
+        
         model = train(train_loader, val_loader, w_class, class_encoding)
+        
+        # full模式下使用加载的test_loader
+        if args.mode.lower() == 'full':
+            final_test_loader = test_loader
+        else:
+            final_test_loader = None
+    else:
+        # test模式下：只加载必要的类别编码信息
+        if args.dataset.lower() == 'water':
+            class_encoding = {'unlabeled': (0, 0, 0), 'water': (255, 255, 255)}
+            w_class = None  # 测试时不需要class_weights，但函数需要参数
+        else:
+            # 对于其他数据集，需要临时加载来获取class_encoding
+            # 这里简化处理，实际可能需要更复杂的逻辑
+            raise NotImplementedError("Test mode for non-water datasets requires dataset-specific handling")
+        
+        final_test_loader = None
+        model = None
 
     if args.mode.lower() in {'test', 'full'}:
         if args.mode.lower() == 'test':
@@ -445,4 +470,109 @@ if __name__ == '__main__':
         if args.mode.lower() == 'test':
             print(model)
 
-        test(model, test_loader, w_class, class_encoding)
+        # 确定使用哪个test_loader
+        if final_test_loader is None:
+            # 需要创建test_loader
+            if args.dataset.lower() == 'water':
+                # 检查是否有指定的test路径
+                if args.test_images is not None and args.test_masks is not None:
+                    # 使用指定的test路径
+                    print("\n" + "="*50)
+                    print(">>> Using SPECIFIED test set <<<")
+                    print("="*50)
+                    print("Test images:", args.test_images)
+                    print("Test masks:", args.test_masks)
+                    
+                    image_transform = transforms.Compose([
+                        transforms.Resize((args.height, args.width)),
+                        transforms.ToTensor()
+                    ])
+                    label_transform_water = transforms.Compose([
+                        transforms.Resize((args.height, args.width), Image.NEAREST),
+                    ])
+                    
+                    test_set = dataset(
+                        root_dir=args.test_images,
+                        transform=image_transform,
+                        label_transform=label_transform_water,
+                        mask_dir=args.test_masks
+                    )
+                    
+                elif args.images is not None and args.masks is not None:
+                    # 使用train时指定的路径作为test（单文件夹测试）
+                    print("\n" + "="*50)
+                    print(">>> Using specified images/masks as test set <<<")
+                    print("="*50)
+                    print("Test images:", args.images)
+                    print("Test masks:", args.masks)
+                    
+                    image_transform = transforms.Compose([
+                        transforms.Resize((args.height, args.width)),
+                        transforms.ToTensor()
+                    ])
+                    label_transform_water = transforms.Compose([
+                        transforms.Resize((args.height, args.width), Image.NEAREST),
+                    ])
+                    
+                    test_set = dataset(
+                        root_dir=args.images,
+                        transform=image_transform,
+                        label_transform=label_transform_water,
+                        mask_dir=args.masks
+                    )
+                    
+                elif args.dataset_dir is not None:
+                    # 使用dataset_dir自动模式
+                    print("\n" + "="*50)
+                    print(">>> Using AUTO test set from dataset-dir <<<")
+                    print("="*50)
+                    print("Dataset dir:", args.dataset_dir)
+                    
+                    image_transform = transforms.Compose([
+                        transforms.Resize((args.height, args.width)),
+                        transforms.ToTensor()
+                    ])
+                    label_transform_water = transforms.Compose([
+                        transforms.Resize((args.height, args.width), Image.NEAREST),
+                    ])
+                    
+                    # 加载完整数据集并划分
+                    full_dataset = dataset(
+                        args.dataset_dir,
+                        transform=image_transform,
+                        label_transform=label_transform_water,
+                        mask_dir=None
+                    )
+                    
+                    # 使用最后一部分作为test（或根据val_split计算）
+                    dataset_size = len(full_dataset)
+                    test_size = int(args.val_split * dataset_size)
+                    train_val_size = dataset_size - test_size
+                    
+                    _, test_set = data.random_split(
+                        full_dataset,
+                        [train_val_size, test_size],
+                        generator=torch.Generator().manual_seed(args.seed)
+                    )
+                else:
+                    raise ValueError("No test data specified. Please provide --test-images/--test-masks, --images/--masks, or --dataset-dir")
+                
+                final_test_loader = data.DataLoader(
+                    test_set,
+                    batch_size=args.batch_size,
+                    shuffle=False,
+                    num_workers=args.workers
+                )
+                
+                print(f"Test dataset size: {len(test_set)}")
+            else:
+                raise NotImplementedError("Test mode for non-water datasets not implemented")
+        
+        # 使用确定的test_loader进行测试
+        test_loader_to_use = final_test_loader if final_test_loader is not None else test_loader
+        
+        # 对于water数据集，如果没有class_weights，创建一个默认的
+        if args.dataset.lower() == 'water' and w_class is None:
+            w_class = torch.ones(len(class_encoding)).to(device)
+        
+        test(model, test_loader_to_use, w_class, class_encoding)

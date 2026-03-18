@@ -85,6 +85,27 @@ python main_water.py -m test `
     --name enet_water `
     --dataset water `
     --dataset-dir ./data/WaterSegmentDataset
+#测试模型（水域分割，）
+# 方式1：指定test路径（推荐）✅
+python main_water_val.py -m test `
+    --save-dir ./save `
+    --name enet_water `
+    --dataset water `
+    --test-images D:\Files\Data\IRWSB\test\images `
+    --test-masks D:\Files\Data\IRWSB\test\masks_red
+# 方式2：使用--images和--masks（如果没有指定--test-images）
+python main_water_val.py -m test `
+    --save-dir ./save `
+    --name enet_water `
+    --dataset water `
+    --images D:\Files\Data\IRWSB\test\images `
+    --masks D:\Files\Data\IRWSB\test\masks_red
+# 方式3：原有的自动模式（仍然支持）
+python main_water_val.py -m test `
+    --save-dir ./save `
+    --name enet_water `
+    --dataset water `
+    --dataset-dir ./data/WaterSegmentDataset
 
 
 #预测模型

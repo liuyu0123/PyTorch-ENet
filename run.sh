@@ -71,6 +71,24 @@ python main_water_val.py `
     --seed 42 `
     --weighing none
 
+#模型训练（pro）
+python main_water_val_pro.py `
+    --mode train `
+    --dataset water `
+    --images D:\Files\Data\IRWSB\train\images `
+    --masks D:\Files\Data\IRWSB\train\masks_red `
+    --val-images D:\Files\Data\IRWSB\val\images `
+    --val-masks D:\Files\Data\IRWSB\val\masks_red `
+    --model-dir ./checkpoints `
+    --log-dir ./logs `
+    --model-name enet_exp01 `
+    --log-name enet_exp01_log `
+    --save-interval 0 `
+    --batch-size 4 `
+    --epochs 5 `
+    --learning-rate 5e-4 `
+    --weighing none `
+    --with-unlabeled
 
 #测试模型
 python main_water.py -m test `

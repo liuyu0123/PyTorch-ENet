@@ -121,3 +121,6 @@ save/enet_water
 save/enet_water_summary.txt
 save/*.csv
 save/*.txt
+
+checkpoints/
+logs/

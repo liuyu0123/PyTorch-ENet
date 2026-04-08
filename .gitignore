@@ -124,3 +124,4 @@ save/*.txt
 
 checkpoints/
 logs/
+results*/

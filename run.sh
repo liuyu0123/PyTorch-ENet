@@ -140,3 +140,11 @@ python predict.py `
     --output-dir ./data/predictions `
     --save-overlay `
     --alpha 0.5
+
+#预测模型pro（生成红色mask蒙版和csv评价指标）
+python predict_pro.py `
+    --input "D:\Files\Data\IRWSB\analyse\images" `
+    --model-path "F:\AAA\7_enetbest\experiment1\experiment1_last.pth" `
+    --output ./results `
+    --ground-truth "D:\Files\Data\IRWSB\analyse\masks_red" `
+    --debug

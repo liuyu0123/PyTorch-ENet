@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import numpy as np
 from PIL import Image
@@ -61,22 +62,29 @@ def load_model(model_path, device):
     return model
 
 def predict_image(model, image_path, transform, device):
-    """对单张图片进行预测"""
+    """对单张图片进行预测，返回原图、预测mask、resize后的预测结果、推理时间(ms)"""
     image = Image.open(image_path).convert('RGB')
     original_size = image.size  # (W, H)
-    
+
     input_tensor = transform(image).unsqueeze(0).to(device)
-    
+
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+    start = time.perf_counter()
     with torch.no_grad():
         output = model(input_tensor)
-        pred = torch.argmax(output, dim=1).squeeze(0)
-    
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+    end = time.perf_counter()
+    inference_time_ms = (end - start) * 1000
+
+    pred = torch.argmax(output, dim=1).squeeze(0)
     pred_mask = pred.cpu().numpy().astype(np.uint8)
     pred_mask_pil = Image.fromarray(pred_mask * 255)
     pred_mask_pil = pred_mask_pil.resize(original_size, Image.NEAREST)
     pred_mask_resized = np.array(pred_mask_pil) // 255
-    
-    return image, pred_mask_pil, pred_mask_resized
+
+    return image, pred_mask_pil, pred_mask_resized, inference_time_ms
 
 def create_overlay(image, mask, alpha=0.5):
     """创建红色半透明叠加图"""
@@ -181,14 +189,16 @@ def save_csv_report(results, output_path):
     """保存CSV报告"""
     csv_path = os.path.join(output_path, 'evaluation_results.csv')
     has_metrics = any('metrics' in r for r in results)
-    
+
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        
+
         if has_metrics:
-            writer.writerow(['Image', 'Precision', 'Recall', 'F1', 'mIoU', 'Pred_Water(%)', 'GT_Water(%)'])
-            
+            writer.writerow(['Image', 'Precision', 'Recall', 'F1', 'mIoU',
+                             'Pred_Water(%)', 'GT_Water(%)', 'Inference_Time(ms)', 'FPS'])
+
             all_metrics = defaultdict(list)
+            inference_times = []
             for result in results:
                 if 'metrics' in result:
                     m = result['metrics']
@@ -199,12 +209,17 @@ def save_csv_report(results, output_path):
                         f"{m['F1']:.4f}",
                         f"{m['mIoU']:.4f}",
                         f"{result['water_ratio']:.2f}",
-                        f"{result.get('gt_water_ratio', 0):.2f}"
+                        f"{result.get('gt_water_ratio', 0):.2f}",
+                        f"{result['inference_time']:.2f}",
+                        f"{result['fps']:.2f}"
                     ])
                     for key in ['Precision', 'Recall', 'F1', 'mIoU']:
                         all_metrics[key].append(m[key])
-            
+                    inference_times.append(result['inference_time'])
+
             if all_metrics['Precision']:
+                avg_infer = np.mean(inference_times)
+                avg_fps = 1000.0 / avg_infer if avg_infer > 0 else 0.0
                 writer.writerow([])
                 writer.writerow([
                     'Average',
@@ -212,13 +227,28 @@ def save_csv_report(results, output_path):
                     f"{np.mean(all_metrics['Recall']):.4f}",
                     f"{np.mean(all_metrics['F1']):.4f}",
                     f"{np.mean(all_metrics['mIoU']):.4f}",
-                    '', ''
+                    '', '',
+                    f"{avg_infer:.2f}",
+                    f"{avg_fps:.2f}"
                 ])
         else:
-            writer.writerow(['Image', 'Water_Ratio(%)'])
+            writer.writerow(['Image', 'Water_Ratio(%)', 'Inference_Time(ms)', 'FPS'])
+            inference_times = []
             for result in results:
-                writer.writerow([result['name'], f"{result['water_ratio']:.2f}"])
-    
+                writer.writerow([
+                    result['name'],
+                    f"{result['water_ratio']:.2f}",
+                    f"{result['inference_time']:.2f}",
+                    f"{result['fps']:.2f}"
+                ])
+                inference_times.append(result['inference_time'])
+
+            if inference_times:
+                avg_infer = np.mean(inference_times)
+                avg_fps = 1000.0 / avg_infer if avg_infer > 0 else 0.0
+                writer.writerow([])
+                writer.writerow(['Average', '', f"{avg_infer:.2f}", f"{avg_fps:.2f}"])
+
     print(f"📊 CSV report saved to: {csv_path}")
 
 def main():
@@ -233,92 +263,128 @@ def main():
             os.makedirs(os.path.join(args.output, 'masks'), exist_ok=True)
     
     model = load_model(args.model_path, device)
-    
+
     transform = transforms.Compose([
         transforms.Resize((args.height, args.width)),
         transforms.ToTensor(),
     ])
-    
+
+    # Warm-up: 用 dummy 输入做一次前向，避免第一张图把 CUDA 初始化时间算进去
+    dummy_input = torch.zeros(1, 3, args.height, args.width, device=device)
+    with torch.no_grad():
+        _ = model(dummy_input)
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+
     image_files = get_image_files(args.input)
     print(f"Found {len(image_files)} image(s)")
-    
+
     all_results = []
     valid_gt_count = 0
-    
+
     for idx, img_path in enumerate(tqdm(image_files, desc="Predicting")):
         img_name = os.path.basename(img_path)
         base_name = os.path.splitext(img_name)[0]
         debug_mode = args.debug and (idx == 0)
-        
+
         try:
-            original_image, pred_mask_pil, pred_array = predict_image(
+            original_image, pred_mask_pil, pred_array, inf_time = predict_image(
                 model, img_path, transform, device
             )
-            
+            fps = 1000.0 / inf_time if inf_time > 0 else 0.0
+
             water_ratio = np.mean(pred_array) * 100
-            result_record = {'name': img_name, 'water_ratio': water_ratio}
-            
+            result_record = {
+                'name': img_name,
+                'water_ratio': water_ratio,
+                'inference_time': inf_time,
+                'fps': fps
+            }
+
             if args.ground_truth:
                 gt_path = find_ground_truth(args.ground_truth, base_name)
-                
+
                 if debug_mode:
                     print(f"\n[Debug] {img_name} -> GT: {gt_path}")
-                
+
                 if gt_path:
                     gt_array = load_ground_truth(gt_path, original_image.size, debug=debug_mode)
                     gt_water_ratio = np.mean(gt_array) * 100
                     result_record['gt_water_ratio'] = gt_water_ratio
-                    
+
                     metrics = calculate_metrics(pred_array, gt_array)
                     result_record['metrics'] = metrics
                     valid_gt_count += 1
-                    
+
                     tqdm.write(f"{img_name}: Pred={water_ratio:.1f}%, GT={gt_water_ratio:.1f}%, "
-                             f"IoU={metrics['mIoU']:.3f}, F1={metrics['F1']:.3f}")
+                             f"IoU={metrics['mIoU']:.3f}, F1={metrics['F1']:.3f}, "
+                             f"Time={inf_time:.2f}ms, FPS={fps:.2f}")
                 else:
-                    tqdm.write(f"{img_name}: Pred={water_ratio:.1f}% (GT not found)")
+                    tqdm.write(f"{img_name}: Pred={water_ratio:.1f}% (GT not found), "
+                             f"Time={inf_time:.2f}ms, FPS={fps:.2f}")
             else:
-                tqdm.write(f"{img_name}: Water = {water_ratio:.2f}%")
-            
+                tqdm.write(f"{img_name}: Water={water_ratio:.2f}%, Time={inf_time:.2f}ms, FPS={fps:.2f}")
+
             all_results.append(result_record)
-            
+
             if args.output:
                 overlay = create_overlay(original_image, pred_mask_pil, args.alpha)
                 overlay.save(os.path.join(args.output, f"{base_name}_overlay.png"))
-                
+
                 if args.save_mask:
                     pred_mask_pil.save(os.path.join(args.output, 'masks', f"{base_name}_mask.png"))
-            
+
         except Exception as e:
             print(f"Error processing {img_name}: {e}")
             import traceback
             traceback.print_exc()
-    
+
     if args.ground_truth:
         print(f"\n📈 Matched with GT: {valid_gt_count}/{len(image_files)} images")
-    
+
     if args.output and all_results:
         save_csv_report(all_results, args.output)
-    elif args.ground_truth and all_results and any('metrics' in r for r in all_results):
-        print("\n" + "="*85)
+
+    if args.ground_truth and all_results and any('metrics' in r for r in all_results):
+        print("\n" + "="*105)
         print("EVALUATION RESULTS")
-        print(f"{'Image':<30} {'Precision':<10} {'Recall':<10} {'F1':<10} {'mIoU':<10}")
-        print("-"*85)
+        print(f"{'Image':<30} {'Precision':<10} {'Recall':<10} {'F1':<10} {'mIoU':<10} {'Time(ms)':<10} {'FPS':<8}")
+        print("-"*105)
         all_metrics = defaultdict(list)
+        inference_times = []
         for result in all_results:
             if 'metrics' in result:
                 m = result['metrics']
                 print(f"{result['name']:<30} {m['Precision']:<10.4f} {m['Recall']:<10.4f} "
-                      f"{m['F1']:<10.4f} {m['mIoU']:<10.4f}")
+                      f"{m['F1']:<10.4f} {m['mIoU']:<10.4f} {result['inference_time']:<10.2f} {result['fps']:<8.2f}")
                 for key in ['Precision', 'Recall', 'F1', 'mIoU']:
                     all_metrics[key].append(m[key])
+                inference_times.append(result['inference_time'])
         if all_metrics['Precision']:
-            print("-"*85)
+            avg_infer = np.mean(inference_times)
+            avg_fps = 1000.0 / avg_infer if avg_infer > 0 else 0.0
+            print("-"*105)
             print(f"{'Average':<30} {np.mean(all_metrics['Precision']):<10.4f} "
                   f"{np.mean(all_metrics['Recall']):<10.4f} {np.mean(all_metrics['F1']):<10.4f} "
-                  f"{np.mean(all_metrics['mIoU']):<10.4f}")
-        print("="*85)
-    
+                  f"{np.mean(all_metrics['mIoU']):<10.4f} {avg_infer:<10.2f} {avg_fps:<8.2f}")
+        print("="*105)
+    elif all_results and not args.ground_truth:
+        # 没有 GT 时也打印一下时间汇总
+        print("\n" + "="*65)
+        print("INFERENCE RESULTS")
+        print(f"{'Image':<30} {'Water_Ratio(%)':<15} {'Time(ms)':<10} {'FPS':<8}")
+        print("-"*65)
+        inference_times = []
+        for result in all_results:
+            print(f"{result['name']:<30} {result['water_ratio']:<15.2f} {result['inference_time']:<10.2f} {result['fps']:<8.2f}")
+            inference_times.append(result['inference_time'])
+        if inference_times:
+            avg_infer = np.mean(inference_times)
+            avg_fps = 1000.0 / avg_infer if avg_infer > 0 else 0.0
+            print("-"*65)
+            print(f"{'Average':<30} {'':<15} {avg_infer:<10.2f} {avg_fps:<8.2f}")
+        print("="*65)
+
     print(f"\n✅ Done!")
 
 if __name__ == '__main__':
